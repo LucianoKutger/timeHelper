@@ -44,3 +44,6 @@ artifacts/
 # Supabase local
 supabase/.branches/
 supabase/.temp/
+
+cloudrun.env
+cloudrun.yaml
