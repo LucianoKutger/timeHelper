@@ -21,6 +21,11 @@
     "plugins": [
       "expo-secure-store",
       "expo-sharing"
-    ]
+    ],
+    "extra": {
+      "eas": {
+        "projectId": "7440f70b-5fab-46fc-ba26-7b7703f8a35c"
+      }
+    }
   }
 }
