@@ -1,0 +1,2 @@
+-- Intentionally contains no real user IDs or work-time data.
+-- Add aliases through the authenticated application or a local test fixture.

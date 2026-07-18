@@ -1,0 +1,50 @@
+[project]
+name = "timehelper-backend"
+version = "0.1.0"
+description = "FastAPI backend for the timeHelper work-time assistant"
+requires-python = ">=3.12,<3.14"
+dependencies = [
+  "email-validator>=2.2",
+  "fastapi>=0.116",
+  "httpx>=0.28",
+  "openpyxl>=3.1",
+  "orjson>=3.10",
+  "pydantic-ai-slim[openai]>=1.0",
+  "pydantic-settings>=2.10",
+  "pyjwt[crypto]>=2.10",
+  "python-multipart>=0.0.20",
+  "structlog>=25.0",
+  "supabase>=2.18",
+  "tenacity>=9.1",
+  "uvicorn[standard]>=0.35",
+]
+
+[dependency-groups]
+dev = [
+  "mypy>=1.17",
+  "pytest>=8.4",
+  "pytest-asyncio>=1.1",
+  "pytest-cov>=6.2",
+  "respx>=0.22",
+  "ruff>=0.12",
+  "types-openpyxl>=3.1",
+]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "ASYNC"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+addopts = "-q --cov=app --cov-report=term-missing"
+pythonpath = ["."]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+plugins = ["pydantic.mypy"]
+exclude = ["tests"]
