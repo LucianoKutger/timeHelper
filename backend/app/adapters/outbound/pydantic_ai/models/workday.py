@@ -109,4 +109,17 @@ class WorkDayAgentOutput(BaseModel):
                 "Es muss mindestens ein Arbeitsblock oder ein Tagesmarker vorhanden sein."
             )
 
+        if self.day_marker is not None and any(
+            work_time is not None
+            for work_time in (
+                self.start_time_one,
+                self.end_time_one,
+                self.start_time_two,
+                self.end_time_two,
+            )
+        ):
+            raise ValueError(
+                "Ein Tagesmarker und Arbeitszeiten dürfen nicht gleichzeitig gesetzt sein."
+            )
+
         return self
