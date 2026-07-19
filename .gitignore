@@ -40,6 +40,7 @@ coverage/
 artifacts/
 *.xlsx
 !backend/tests/fixtures/*.xlsx
+!backend/templates/excel/*.xlsx
 
 # Supabase local
 supabase/.branches/
