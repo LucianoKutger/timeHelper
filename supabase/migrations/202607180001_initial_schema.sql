@@ -4,35 +4,32 @@ create table if not exists public.work_days (
   id uuid primary key default gen_random_uuid(),
   user_id uuid not null references auth.users(id) on delete cascade,
   work_date date not null,
-  start_time_1 time,
-  end_time_1 time,
-  start_time_2 time,
-  end_time_2 time,
-  break_minutes integer not null default 0,
-  day_code text,
+  start_time_one time,
+  end_time_one time,
+  start_time_two time,
+  end_time_two time,
+  day_marker text,
   note text,
-  source_text text,
-  status text not null default 'active',
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now(),
   constraint valid_block_1 check (
-    (start_time_1 is null and end_time_1 is null)
-    or (start_time_1 is not null and end_time_1 > start_time_1)
+    (start_time_one is null and end_time_one is null)
+    or (start_time_one is not null and end_time_one > start_time_one)
   ),
   constraint valid_block_2 check (
-    (start_time_2 is null and end_time_2 is null)
-    or (start_time_2 is not null and end_time_2 > start_time_2)
+    (start_time_two is null and end_time_two is null)
+    or (start_time_two is not null and end_time_two > start_time_two)
   ),
-  constraint valid_break check (break_minutes between 0 and 720),
-  constraint valid_day_code check (
-    day_code is null or day_code in ('K','KR','U','UH','G','H','KU','KA','B')
+  constraint valid_day_marker check (
+    day_marker is null or day_marker in ('K', 'U')
   ),
-  constraint has_work_or_code check (start_time_1 is not null or day_code is not null)
+  constraint work_days_has_work_or_marker check (
+    start_time_one is not null or day_marker is not null
+  )
 );
 
 create unique index if not exists uq_work_day_per_date
-  on public.work_days (user_id, work_date)
-  where status <> 'deleted';
+  on public.work_days (user_id, work_date);
 
 create table if not exists public.command_requests (
   request_id uuid not null,
