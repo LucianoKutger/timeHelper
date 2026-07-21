@@ -1,5 +1,14 @@
 FROM ghcr.io/astral-sh/uv:python3.13-trixie-slim
 
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends locales \
+    && echo "de_DE.UTF-8 UTF-8" > /etc/locale.gen \
+    && locale-gen \
+    && rm -rf /var/lib/apt/lists/*
+
+ENV LANG=de_DE.UTF-8 \
+    LC_TIME=de_DE.UTF-8
+
 WORKDIR /app
 
 ENV PYTHONUNBUFFERED=1 \

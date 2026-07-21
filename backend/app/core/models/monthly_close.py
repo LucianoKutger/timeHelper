@@ -1,7 +1,10 @@
 from pydantic import BaseModel
-from app.core.models.workday import WorkDayCreate
+from app.core.models.workday import WorkDay
 
 
 class MonthlyClose(BaseModel):
-    month_by_int: int
-    work_days: list[WorkDayCreate]
+    work_days: list[WorkDay]
+
+
+class GeneratedWorkbook(BaseModel):
+    content: bytes
