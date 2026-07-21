@@ -21,7 +21,7 @@ export interface WorkDayPreview {
   start_time_2: string | null;
   end_time_2: string | null;
   break_minutes: number;
-  day_code: string | null;
+  day_marker: "K" | "U" | null;
   note: string | null;
   net_minutes: number;
 }
