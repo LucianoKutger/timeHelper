@@ -7,7 +7,7 @@ from app.core.models.Enums import DayMarker
 
 
 class WorkDayAgentOutput(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
     work_date: date = Field(
         description=(
@@ -59,6 +59,7 @@ class WorkDayAgentOutput(BaseModel):
 
     note: str | None = Field(
         default=None,
+        min_length=1,
         max_length=500,
         description=(
             "Beschreibung oder Grund der Tätigkeit, zum Beispiel BasKidball. "

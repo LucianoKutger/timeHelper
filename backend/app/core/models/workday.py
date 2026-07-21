@@ -1,6 +1,9 @@
-from pydantic import BaseModel
 from datetime import date, datetime, time
 from uuid import UUID
+
+from pydantic import BaseModel
+
+from app.core.models.Enums import DayMarker
 
 
 class WorkDayCreate(BaseModel):
@@ -9,7 +12,7 @@ class WorkDayCreate(BaseModel):
     end_time_one: time | None = None
     start_time_two: time | None = None
     end_time_two: time | None = None
-    day_marker: str | None = None
+    day_marker: DayMarker | None = None
     note: str | None = None
 
 
