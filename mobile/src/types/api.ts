@@ -13,6 +13,10 @@ export interface ApiResponse<T> {
   error: Record<string, unknown> | null;
 }
 
+export interface WorkDayResponse {
+  response_massage: string;
+}
+
 export interface WorkDayPreview {
   action: 'upsert_work_day';
   work_date: string;
