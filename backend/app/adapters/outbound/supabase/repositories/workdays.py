@@ -108,7 +108,9 @@ class SupabaseWorkdayRepository:
             ) from error
 
         if not response.data:
-            logger.error("Supabase hat nach dem Anlegen keinen Arbeitstag zurückgegeben")
+            logger.error(
+                "Supabase hat nach dem Anlegen keinen Arbeitstag zurückgegeben"
+            )
             raise WorkdayRepositoryError(
                 "Supabase hat nach dem Anlegen keinen Arbeitstag zurückgegeben.",
                 provider_code="EMPTY_RESPONSE",
