@@ -42,18 +42,16 @@ class SupabaseExceLStorage:
 
     def save_excel(self, excel_bytes: bytes, year: int, month: int) -> any:
         written_month = self.get_written_month(month, year, "save")
-        file_path = (
-            f"{self.current_user.id}/"
-            f"Arbeitszeit_{year}_{written_month}_Giuliano.xlsx"
-        )
+        filename = f"Arbeitszeit_{year}_{written_month}_Giuliano.xlsx"
+        file_path = f"{self.current_user.id}/{filename}"
 
         response = self.supabase.storage.from_(self.bucket_name).upload(
             path=file_path,
             file=excel_bytes,
             file_options={
+                "upsert": "true",
                 "content-type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                "upsert": "false",
             },
         )
 
-        return response
+        return filename

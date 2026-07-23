@@ -1,6 +1,5 @@
-from datetime import date
-from urllib import response
-
+from app.core.models.email_draft import EmailDraft
+from app.core.ports.outbound.gateways.email_drafts import EmailDraftGateway
 from app.core.ports.outbound.repositories.workdays import WorkdayRepository
 from app.core.ports.outbound.generators.workbook import WorkbookGenerator
 from app.core.ports.outbound.mapper.workday import MapWorkday
@@ -15,11 +14,15 @@ class CreateWorkBook:
         generator: WorkbookGenerator,
         storage: FileStorage,
         mapper: MapWorkday,
+        gateway: EmailDraftGateway,
+        emailDraft: EmailDraft,
     ):
         self.repository = repository
         self.generator = generator
         self.storgae = storage
         self.mapper = mapper
+        self.gateway = gateway
+        self.emailDraft = emailDraft
 
     def execute_workbook(self, year: int, month: int):
 
@@ -27,6 +30,9 @@ class CreateWorkBook:
         mapped_workdays = self.mapper.map(workdays)
         current_workbook = self.storgae.get_excel(year, month)
         new_workbook = self.generator.create_workbook(current_workbook, mapped_workdays)
-        response = self.storgae.save_excel(new_workbook.content, year, month)
+        filename = self.storgae.save_excel(new_workbook.content, year, month)
+        emailResponse = self.gateway.save_draft(
+            self.emailDraft, new_workbook.content, filename
+        )
 
-        return response
+        return emailResponse

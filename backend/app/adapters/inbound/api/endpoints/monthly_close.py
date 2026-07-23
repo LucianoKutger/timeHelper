@@ -7,6 +7,9 @@ from app.adapters.inbound.api.models.dependencie.current_user import CurrentUser
 from app.adapters.outbound.supabase.repositories.workdays import (
     SupabaseWorkdayRepository,
 )
+from app.adapters.outbound.webde.gateways.email_drafts import WebDeEmailDraftGateway
+from app.adapters.outbound.webde.templates.monthly_close import EmailDarftTemplates
+from app.core.models.email_draft import EmailDraft
 from app.core.use_cases.monthly_close.create import CreateWorkBook
 from app.core.models.workday import WorkDay
 from app.adapters.outbound.excel.generators.monthly_workbook import (
@@ -27,9 +30,13 @@ def close_month(
     generator = ExcelWorkbookGenerator()
     storage = SupabaseExceLStorage(current_user, "worktime")
     mapper = MapWorkdayToExcel()
+    gateway = WebDeEmailDraftGateway()
+    emailDraft = EmailDarftTemplates.baskidEmailDraft(request.year, request.month)
 
-    use_case = CreateWorkBook(repository, generator, storage, mapper)
+    use_case = CreateWorkBook(
+        repository, generator, storage, mapper, gateway, emailDraft
+    )
 
-    workdays = use_case.execute_workbook(request.year, request.month)
+    use_case.execute_workbook(request.year, request.month)
 
     return MonthlyCloseResponse(response_message="Monatsabschluss erfolgreich erstellt")
