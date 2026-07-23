@@ -17,6 +17,10 @@ export interface WorkDayResponse {
   response_massage: string;
 }
 
+export interface MonthlyCloseResponse {
+  response_message: string;
+}
+
 export interface WorkDayPreview {
   action: 'upsert_work_day';
   work_date: string;

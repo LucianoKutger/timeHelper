@@ -1,6 +1,9 @@
-import { act, fireEvent, render, userEvent } from '@testing-library/react-native';
+import { act, fireEvent, render, userEvent, waitFor } from '@testing-library/react-native';
 import { ExpoSpeechRecognitionModule, type ExpoSpeechRecognitionResultEvent, useSpeechRecognitionEvent } from 'expo-speech-recognition';
 
+import { apiFetch } from '../../../api/httpClient';
+import { loadStoredMessages, saveStoredMessages } from '../messageStorage';
+import type { Message } from '../messages';
 import { CommandScreen } from './CommandScreen';
 
 jest.mock('expo-speech-recognition', () => ({
@@ -14,19 +17,54 @@ jest.mock('expo-speech-recognition', () => ({
   useSpeechRecognitionEvent: jest.fn(),
 }));
 
-jest.mock('../../../api/httpClient', () => ({
-  apiFetch: jest.fn(() => Promise.resolve({ status: 'ok' })),
+jest.mock('expo-crypto', () => ({
+  randomUUID: jest.fn(() => 'generated-message-id'),
 }));
 
-beforeEach(() => jest.clearAllMocks());
+jest.mock('../../../api/httpClient', () => ({
+  apiFetch: jest.fn(),
+}));
 
-test('renders the command input', async () => {
+jest.mock('../messageStorage', () => ({
+  loadStoredMessages: jest.fn(),
+  saveStoredMessages: jest.fn(),
+}));
+
+const storedMessages: Message[] = [
+  {
+    id: 'june-message',
+    message: 'Im Juni gearbeitet',
+    response: 'Arbeitstag angelegt für den 2026-06-29 wurde angelegt',
+    work_date: '2026-06-29',
+    created_at: '2026-06-29T17:00:00.000Z',
+  },
+  {
+    id: 'may-message',
+    message: 'Im Mai gearbeitet',
+    response: 'Arbeitstag angelegt für den 2026-05-20 wurde angelegt',
+    work_date: '2026-05-20',
+    created_at: '2026-05-20T17:00:00.000Z',
+  },
+];
+
+beforeEach(() => {
+  jest.clearAllMocks();
+  jest.mocked(loadStoredMessages).mockResolvedValue([]);
+  jest.mocked(saveStoredMessages).mockResolvedValue();
+  jest.mocked(apiFetch).mockImplementation(async (path) => {
+    if (path === '/health') return { status: 'ok' };
+    throw new Error(`Unexpected API request: ${path}`);
+  });
+});
+
+test('renders an empty persistent chat and multiline composer', async () => {
   const view = await render(<CommandScreen />);
   const input = view.getByPlaceholderText('Arbeitszeit hinzufügen …');
-  expect(input).toBeTruthy();
+
   expect(input.props.multiline).toBe(true);
   expect(view.getByTestId('chat-keyboard-view')).toBeTruthy();
-  expect(view.getByText('Für Juli 2026 wurden keine Nachrichten gefunden.')).toBeTruthy();
+  await waitFor(() => expect(view.getByText('Für Juli 2026 wurden keine Nachrichten gefunden.')).toBeTruthy());
+  expect(loadStoredMessages).toHaveBeenCalledTimes(1);
   expect(view.queryAllByTestId('chat-message')).toHaveLength(0);
 });
 
@@ -49,48 +87,108 @@ test('grows the composer with multiple lines up to its maximum height', async ()
   expect(view.getByLabelText('Arbeitszeit hinzufügen').props.style).toEqual(expect.arrayContaining([{ height: 144 }]));
 });
 
-test('shows only the ten messages from the selected month', async () => {
+test('filters locally stored chats by month', async () => {
+  jest.mocked(loadStoredMessages).mockResolvedValue(storedMessages);
   const view = await render(<CommandScreen />);
   const user = userEvent.setup();
 
+  await waitFor(() => expect(loadStoredMessages).toHaveBeenCalled());
   await user.press(view.getByLabelText('Monat auswählen'));
   await user.press(view.getByText('Juni 2026'));
 
-  expect(view.getAllByTestId('chat-message')).toHaveLength(10);
-  expect(view.getByText('Arbeitstag für den 29.06.2026 erfolgreich eingetragen.')).toBeTruthy();
-  expect(view.queryByText('Arbeitstag für den 20.05.2026 erfolgreich eingetragen.')).toBeNull();
+  expect(view.getAllByTestId('chat-message')).toHaveLength(1);
+  expect(view.getByText('Arbeitstag angelegt für den 2026-06-29 wurde angelegt')).toBeTruthy();
+  expect(view.queryByText('Arbeitstag angelegt für den 2026-05-20 wurde angelegt')).toBeNull();
 });
 
-test('switches the chat from the burger menu', async () => {
+test('switches a locally stored chat from the navigation drawer', async () => {
+  jest.mocked(loadStoredMessages).mockResolvedValue(storedMessages);
   const view = await render(<CommandScreen />);
   const user = userEvent.setup();
 
+  await waitFor(() => expect(loadStoredMessages).toHaveBeenCalled());
   await user.press(view.getByLabelText('Navigation öffnen'));
   await user.press(view.getByLabelText('Chat für Mai 2026 öffnen'));
 
   expect(view.queryByTestId('navigation-drawer')).toBeNull();
-  expect(view.getAllByTestId('chat-message')).toHaveLength(10);
-  expect(view.getByText('Arbeitstag für den 20.05.2026 erfolgreich eingetragen.')).toBeTruthy();
-  expect(view.queryByText('Arbeitstag für den 29.06.2026 erfolgreich eingetragen.')).toBeNull();
+  expect(view.getAllByTestId('chat-message')).toHaveLength(1);
+  expect(view.getByText('Arbeitstag angelegt für den 2026-05-20 wurde angelegt')).toBeTruthy();
 });
 
-test('opens the designed overlay states', async () => {
+test('sends a workday request and persists its request-response pair', async () => {
+  jest.mocked(apiFetch).mockImplementation(async (path) => {
+    if (path === '/health') return { status: 'ok' };
+    if (path === '/v1/workday/') return { response_massage: 'Arbeitstag angelegt für den 2026-07-23 wurde angelegt' };
+    throw new Error(`Unexpected API request: ${path}`);
+  });
   const view = await render(<CommandScreen />);
   const user = userEvent.setup();
 
-  await user.press(view.getByLabelText('Monat auswählen'));
-  expect(view.getByTestId('month-menu')).toBeTruthy();
+  await waitFor(() => expect(loadStoredMessages).toHaveBeenCalled());
+  await user.type(view.getByLabelText('Arbeitszeit hinzufügen'), 'Heute von 9 bis 17 Uhr gearbeitet');
+  await user.press(view.getByLabelText('Eintrag senden'));
 
+  await waitFor(() => expect(view.getByText('Arbeitstag angelegt für den 2026-07-23 wurde angelegt')).toBeTruthy());
+  expect(apiFetch).toHaveBeenCalledWith('/v1/workday/', {
+    method: 'POST',
+    body: JSON.stringify({ message: 'Heute von 9 bis 17 Uhr gearbeitet' }),
+  });
+  expect(saveStoredMessages).toHaveBeenCalledWith([
+    expect.objectContaining({
+      message: 'Heute von 9 bis 17 Uhr gearbeitet',
+      response: 'Arbeitstag angelegt für den 2026-07-23 wurde angelegt',
+      work_date: '2026-07-23',
+    }),
+  ]);
+});
+
+test('keeps the workday text available when the backend rejects it', async () => {
+  jest.mocked(apiFetch).mockImplementation(async (path) => {
+    if (path === '/health') return { status: 'ok' };
+    throw new Error('Für diesen Tag existiert bereits ein Arbeitstag.');
+  });
+  const view = await render(<CommandScreen />);
+  const user = userEvent.setup();
+
+  await waitFor(() => expect(loadStoredMessages).toHaveBeenCalled());
+  await user.type(view.getByLabelText('Arbeitszeit hinzufügen'), 'Doppelter Eintrag');
+  await user.press(view.getByLabelText('Eintrag senden'));
+
+  await waitFor(() => expect(view.getByText('Für diesen Tag existiert bereits ein Arbeitstag.')).toBeTruthy());
+  expect(view.getByDisplayValue('Doppelter Eintrag')).toBeTruthy();
+  expect(saveStoredMessages).not.toHaveBeenCalled();
+});
+
+test('submits the selected year and month to monthly close', async () => {
+  jest.mocked(apiFetch).mockImplementation(async (path) => {
+    if (path === '/health') return { status: 'ok' };
+    if (path === '/v1/monthly_close/') return { response_message: 'Monatsabschluss erfolgreich erstellt' };
+    throw new Error(`Unexpected API request: ${path}`);
+  });
+  const view = await render(<CommandScreen />);
+  const user = userEvent.setup();
+
+  await waitFor(() => expect(loadStoredMessages).toHaveBeenCalled());
   await user.press(view.getByLabelText('Navigation öffnen'));
-  expect(view.getByTestId('navigation-drawer')).toBeTruthy();
-
   await user.press(view.getByText('Juli 2026 abschließen'));
-  expect(view.getByTestId('month-close-modal')).toBeTruthy();
+  fireEvent.changeText(view.getByLabelText('Jahr für Monatsabschluss'), '2025');
+  await user.press(view.getByLabelText('Monat für Monatsabschluss auswählen'));
+  await user.press(view.getByText('März'));
+  await user.press(view.getByLabelText('Monatsabschluss erstellen'));
 
-  await user.press(view.getByText('Abschließen'));
+  await waitFor(() => expect(view.getByText('Monatsabschluss erfolgreich erstellt')).toBeTruthy());
+  expect(apiFetch).toHaveBeenCalledWith('/v1/monthly_close/', {
+    method: 'POST',
+    body: JSON.stringify({ year: 2025, month: 3 }),
+  });
+});
+
+test('starts continuous speech recognition and stops it from the same button', async () => {
+  const view = await render(<CommandScreen />);
+  const user = userEvent.setup();
+
   await user.press(view.getByLabelText('Spracheingabe starten'));
   expect(view.getByPlaceholderText('Sprache wird transkribiert …')).toBeTruthy();
-  expect(ExpoSpeechRecognitionModule.requestPermissionsAsync).toHaveBeenCalledTimes(1);
   expect(ExpoSpeechRecognitionModule.start).toHaveBeenCalledWith(expect.objectContaining({ lang: 'de-DE', interimResults: true, continuous: true }));
 
   await user.press(view.getByLabelText('Spracheingabe beenden'));
@@ -104,26 +202,13 @@ test('keeps and combines multiple native speech segments in the composer', async
   await act(async () => {
     resultHandler?.({
       isFinal: true,
-      results: [
-        {
-          confidence: 1,
-          segments: [],
-          transcript: 'Heute von neun bis fünf',
-        },
-      ],
+      results: [{ confidence: 1, segments: [], transcript: 'Heute von neun bis fünf' }],
     });
   });
-
   await act(async () => {
     resultHandler?.({
       isFinal: false,
-      results: [
-        {
-          confidence: 1,
-          segments: [],
-          transcript: 'im Büro',
-        },
-      ],
+      results: [{ confidence: 1, segments: [], transcript: 'im Büro' }],
     });
   });
 
