@@ -116,9 +116,10 @@ test('switches a locally stored chat from the navigation drawer', async () => {
 });
 
 test('sends a workday request and persists its request-response pair', async () => {
+  let resolveWorkdayRequest: ((value: { response_massage: string }) => void) | undefined;
   jest.mocked(apiFetch).mockImplementation(async (path) => {
     if (path === '/health') return { status: 'ok' };
-    if (path === '/v1/workday/') return { response_massage: 'Arbeitstag angelegt für den 2026-07-23 wurde angelegt' };
+    if (path === '/v1/workday/') return new Promise((resolve) => (resolveWorkdayRequest = resolve));
     throw new Error(`Unexpected API request: ${path}`);
   });
   const view = await render(<CommandScreen />);
@@ -128,6 +129,15 @@ test('sends a workday request and persists its request-response pair', async () 
   await user.type(view.getByLabelText('Arbeitszeit hinzufügen'), 'Heute von 9 bis 17 Uhr gearbeitet');
   await user.press(view.getByLabelText('Eintrag senden'));
 
+  expect(view.getByText('Heute von 9 bis 17 Uhr gearbeitet')).toBeTruthy();
+  expect(view.getByLabelText('Timehelper antwortet …')).toBeTruthy();
+  expect(saveStoredMessages).not.toHaveBeenCalled();
+
+  await act(async () => {
+    resolveWorkdayRequest?.({ response_massage: 'Arbeitstag angelegt für den 2026-07-23 wurde angelegt' });
+  });
+  expect(saveStoredMessages).toHaveBeenCalledTimes(1);
+  expect(view.queryByText('Arbeitstag angelegt für den 2026-07-23 wurde angelegt')).toBeNull();
   await waitFor(() => expect(view.getByText('Arbeitstag angelegt für den 2026-07-23 wurde angelegt')).toBeTruthy());
   expect(apiFetch).toHaveBeenCalledWith('/v1/workday/', {
     method: 'POST',
@@ -142,9 +152,13 @@ test('sends a workday request and persists its request-response pair', async () 
   ]);
 });
 
-test('keeps the workday text available when the backend rejects it', async () => {
+test('keeps a failed workday visible and retries it without persisting the failure', async () => {
+  let workdayAttempts = 0;
   jest.mocked(apiFetch).mockImplementation(async (path) => {
     if (path === '/health') return { status: 'ok' };
+    if (path === '/v1/workday/' && workdayAttempts++ > 0) {
+      return { response_massage: 'Arbeitstag für den 2026-07-23 wurde angelegt' };
+    }
     throw new Error('Für diesen Tag existiert bereits ein Arbeitstag.');
   });
   const view = await render(<CommandScreen />);
@@ -155,14 +169,20 @@ test('keeps the workday text available when the backend rejects it', async () =>
   await user.press(view.getByLabelText('Eintrag senden'));
 
   await waitFor(() => expect(view.getByText('Für diesen Tag existiert bereits ein Arbeitstag.')).toBeTruthy());
-  expect(view.getByDisplayValue('Doppelter Eintrag')).toBeTruthy();
+  expect(view.getByText('Doppelter Eintrag')).toBeTruthy();
+  expect(view.getByLabelText('Nachricht erneut senden')).toBeTruthy();
+  expect(view.getByDisplayValue('')).toBeTruthy();
   expect(saveStoredMessages).not.toHaveBeenCalled();
+
+  await user.press(view.getByLabelText('Nachricht erneut senden'));
+  await waitFor(() => expect(saveStoredMessages).toHaveBeenCalledWith([expect.objectContaining({ message: 'Doppelter Eintrag' })]));
 });
 
 test('submits the selected year and month to monthly close', async () => {
+  let resolveMonthlyCloseRequest: ((value: { response_message: string }) => void) | undefined;
   jest.mocked(apiFetch).mockImplementation(async (path) => {
     if (path === '/health') return { status: 'ok' };
-    if (path === '/v1/monthly_close/') return { response_message: 'Monatsabschluss erfolgreich erstellt' };
+    if (path === '/v1/monthly_close/') return new Promise((resolve) => (resolveMonthlyCloseRequest = resolve));
     throw new Error(`Unexpected API request: ${path}`);
   });
   const view = await render(<CommandScreen />);
@@ -176,11 +196,35 @@ test('submits the selected year and month to monthly close', async () => {
   await user.press(view.getByText('März'));
   await user.press(view.getByLabelText('Monatsabschluss erstellen'));
 
+  expect(view.getByTestId('month-close-modal')).toBeTruthy();
+  expect(view.getByLabelText('Monatsabschluss schließen').props.accessibilityState).toEqual({ disabled: true });
+  await act(async () => {
+    resolveMonthlyCloseRequest?.({ response_message: 'Monatsabschluss erfolgreich erstellt' });
+  });
   await waitFor(() => expect(view.getByText('Monatsabschluss erfolgreich erstellt')).toBeTruthy());
   expect(apiFetch).toHaveBeenCalledWith('/v1/monthly_close/', {
     method: 'POST',
     body: JSON.stringify({ year: 2025, month: 3 }),
   });
+  await waitFor(() => expect(view.queryByTestId('month-close-modal')).toBeNull(), { timeout: 2000 });
+});
+
+test('keeps the monthly close modal open after an error', async () => {
+  jest.mocked(apiFetch).mockImplementation(async (path) => {
+    if (path === '/health') return { status: 'ok' };
+    throw new Error('Monatsabschluss fehlgeschlagen.');
+  });
+  const view = await render(<CommandScreen />);
+  const user = userEvent.setup();
+
+  await waitFor(() => expect(loadStoredMessages).toHaveBeenCalled());
+  await user.press(view.getByLabelText('Navigation öffnen'));
+  await user.press(view.getByText('Juli 2026 abschließen'));
+  await user.press(view.getByLabelText('Monatsabschluss erstellen'));
+
+  await waitFor(() => expect(view.getByText('Monatsabschluss fehlgeschlagen.')).toBeTruthy());
+  expect(view.getByTestId('month-close-modal')).toBeTruthy();
+  expect(view.getByLabelText('Monatsabschluss schließen').props.accessibilityState).toEqual({ disabled: false });
 });
 
 test('starts continuous speech recognition and stops it from the same button', async () => {
