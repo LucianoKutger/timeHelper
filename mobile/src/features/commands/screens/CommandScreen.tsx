@@ -7,6 +7,7 @@ import {
   useSpeechRecognitionEvent,
 } from 'expo-speech-recognition';
 import {
+  AccessibilityInfo,
   ActivityIndicator,
   KeyboardAvoidingView,
   Platform,
@@ -28,6 +29,17 @@ import type { Message } from '../messages';
 const germanMonthNames = ['Januar', 'Februar', 'März', 'April', 'Mai', 'Juni', 'Juli', 'August', 'September', 'Oktober', 'November', 'Dezember'] as const;
 const minimumComposerInputHeight = 48;
 const maximumComposerInputHeight = 144;
+const responseWordDelayMilliseconds = 55;
+const monthlyCloseSuccessDelayMilliseconds = 800;
+
+type TransientChatMessage = {
+  id: string;
+  message: string;
+  monthKey: string;
+  status: 'pending' | 'revealing' | 'error';
+  visibleResponse: string;
+  error?: string;
+};
 
 function localMonthKey(date = new Date()) {
   return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}`;
@@ -75,17 +87,41 @@ function workDateFromResponse(response: string, fallbackMonth: string) {
   return response.match(/\b\d{4}-\d{2}-\d{2}\b/)?.[0] ?? `${fallbackMonth}-01`;
 }
 
+function TypingIndicator({ reduceMotion }: { reduceMotion: boolean }) {
+  const [dotCount, setDotCount] = useState(1);
+
+  useEffect(() => {
+    if (reduceMotion) return;
+
+    const interval = setInterval(() => setDotCount((currentCount) => (currentCount % 3) + 1), 320);
+    return () => clearInterval(interval);
+  }, [reduceMotion]);
+
+  return (
+    <View accessibilityLabel="Timehelper antwortet …" accessibilityLiveRegion="polite" style={styles.typingIndicator}>
+      <Text style={styles.typingIndicatorText}>Timehelper antwortet</Text>
+      <Text style={styles.typingDots}>{'.'.repeat(reduceMotion ? 3 : dotCount)}</Text>
+    </View>
+  );
+}
+
 type CommandScreenProps = {
   onOpenSettings?: () => void;
 };
 
 export function CommandScreen({ onOpenSettings }: CommandScreenProps) {
   const chatScrollRef = useRef<ScrollView>(null);
+  const messagesRef = useRef<Message[]>([]);
+  const activeSubmissionIdRef = useRef<string | null>(null);
+  const responseWordTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const monthlyCloseTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const reduceMotionRef = useRef(false);
   const recognitionStartedRef = useRef(false);
   const speechFinalTranscriptRef = useRef('');
   const speechInputPrefixRef = useRef('');
   const [message, setMessage] = useState('');
   const [messages, setMessages] = useState<Message[]>([]);
+  const [transientMessage, setTransientMessage] = useState<TransientChatMessage | null>(null);
   const [selectedMonthKey, setSelectedMonthKey] = useState(localMonthKey);
   const [historyLoading, setHistoryLoading] = useState(true);
   const [chatError, setChatError] = useState<string | null>(null);
@@ -101,6 +137,7 @@ export function CommandScreen({ onOpenSettings }: CommandScreenProps) {
   const [voiceError, setVoiceError] = useState<string | null>(null);
   const [composerInputHeight, setComposerInputHeight] = useState(minimumComposerInputHeight);
   const [sending, setSending] = useState(false);
+  const [reduceMotion, setReduceMotion] = useState(false);
 
   const monthOptions = Array.from(new Set([...recentMonthKeys(), ...messages.map((storedMessage) => storedMessage.work_date.slice(0, 7)), selectedMonthKey]))
     .sort((first, second) => second.localeCompare(first))
@@ -109,12 +146,29 @@ export function CommandScreen({ onOpenSettings }: CommandScreenProps) {
   const selectedMessages = messages
     .filter((storedMessage) => storedMessage.work_date.startsWith(selectedMonth.key))
     .sort((first, second) => first.created_at.localeCompare(second.created_at));
+  const selectedTransientMessage = transientMessage?.monthKey === selectedMonth.key ? transientMessage : null;
+  const monthlyCloseCompleted = monthlyCloseResult?.kind === 'success';
+  const monthlyCloseLocked = monthlyCloseSubmitting || monthlyCloseCompleted;
 
   useEffect(() => {
     apiFetch<{ status: string }>('/health').catch(() => undefined);
 
+    AccessibilityInfo.isReduceMotionEnabled()
+      .then((enabled) => {
+        reduceMotionRef.current = enabled;
+        setReduceMotion(enabled);
+      })
+      .catch(() => undefined);
+    const reduceMotionSubscription = AccessibilityInfo.addEventListener('reduceMotionChanged', (enabled) => {
+      reduceMotionRef.current = enabled;
+      setReduceMotion(enabled);
+    });
+
     return () => {
       if (recognitionStartedRef.current) ExpoSpeechRecognitionModule.abort();
+      if (responseWordTimerRef.current) clearTimeout(responseWordTimerRef.current);
+      if (monthlyCloseTimerRef.current) clearTimeout(monthlyCloseTimerRef.current);
+      reduceMotionSubscription.remove();
     };
   }, []);
 
@@ -123,7 +177,10 @@ export function CommandScreen({ onOpenSettings }: CommandScreenProps) {
 
     loadStoredMessages()
       .then((storedMessages) => {
-        if (active) setMessages(storedMessages);
+        if (active) {
+          messagesRef.current = storedMessages;
+          setMessages(storedMessages);
+        }
       })
       .catch(() => {
         if (active) setChatError('Die lokale Chat-Historie konnte nicht geladen werden.');
@@ -215,12 +272,49 @@ export function CommandScreen({ onOpenSettings }: CommandScreenProps) {
     setVoiceActive(false);
   };
 
-  const submitMessage = async () => {
-    const trimmedMessage = message.trim();
+  const revealResponse = async (submissionId: string, response: string) => {
+    if (reduceMotionRef.current) {
+      setTransientMessage((currentMessage) =>
+        currentMessage?.id === submissionId ? { ...currentMessage, status: 'revealing', visibleResponse: response } : currentMessage,
+      );
+      return;
+    }
+
+    const words = response.match(/\S+\s*/g) ?? [response];
+    setTransientMessage((currentMessage) =>
+      currentMessage?.id === submissionId ? { ...currentMessage, status: 'revealing', visibleResponse: '' } : currentMessage,
+    );
+
+    for (let wordIndex = 0; wordIndex < words.length; wordIndex += 1) {
+      await new Promise<void>((resolve) => {
+        responseWordTimerRef.current = setTimeout(resolve, responseWordDelayMilliseconds);
+      });
+      if (activeSubmissionIdRef.current !== submissionId) return;
+
+      const visibleResponse = words.slice(0, wordIndex + 1).join('').trimEnd();
+      setTransientMessage((currentMessage) => (currentMessage?.id === submissionId ? { ...currentMessage, visibleResponse } : currentMessage));
+    }
+  };
+
+  const submitMessage = async (messageToRetry?: string) => {
+    const trimmedMessage = (messageToRetry ?? message).trim();
     if (!trimmedMessage || sending || historyLoading) return;
 
+    const submissionId = Crypto.randomUUID();
+    const submissionMonthKey = selectedMonth.key;
+    activeSubmissionIdRef.current = submissionId;
+    if (responseWordTimerRef.current) clearTimeout(responseWordTimerRef.current);
+    setTransientMessage({
+      id: submissionId,
+      message: trimmedMessage,
+      monthKey: submissionMonthKey,
+      status: 'pending',
+      visibleResponse: '',
+    });
     setSending(true);
     setChatError(null);
+    setMessage('');
+    setComposerInputHeight(minimumComposerInputHeight);
 
     try {
       const payload = await apiFetch<WorkDayResponse>('/v1/workday/', {
@@ -229,28 +323,36 @@ export function CommandScreen({ onOpenSettings }: CommandScreenProps) {
       });
 
       const response = payload.response_massage;
-      const workDate = workDateFromResponse(response, selectedMonth.key);
+      const workDate = workDateFromResponse(response, submissionMonthKey);
       const storedMessage: Message = {
-        id: Crypto.randomUUID(),
+        id: submissionId,
         message: trimmedMessage,
         response,
         work_date: workDate,
         created_at: new Date().toISOString(),
       };
-      const updatedMessages = [...messages, storedMessage];
+      const responseMonthKey = workDate.slice(0, 7);
+      setSelectedMonthKey(responseMonthKey);
+      setTransientMessage((currentMessage) => (currentMessage?.id === submissionId ? { ...currentMessage, monthKey: responseMonthKey } : currentMessage));
+
+      const updatedMessages = [...messagesRef.current, storedMessage];
+      messagesRef.current = updatedMessages;
+      const persistencePromise = saveStoredMessages(updatedMessages).catch(() => {
+        setChatError('Der Arbeitstag wurde gespeichert, aber die lokale Chat-Historie konnte nicht aktualisiert werden.');
+      });
+
+      await revealResponse(submissionId, response);
+      if (activeSubmissionIdRef.current !== submissionId) return;
 
       setMessages(updatedMessages);
-      setSelectedMonthKey(workDate.slice(0, 7));
-      setMessage('');
-      setComposerInputHeight(minimumComposerInputHeight);
-
-      try {
-        await saveStoredMessages(updatedMessages);
-      } catch {
-        setChatError('Der Arbeitstag wurde gespeichert, aber die lokale Chat-Historie konnte nicht aktualisiert werden.');
-      }
+      setTransientMessage(null);
+      activeSubmissionIdRef.current = null;
+      await persistencePromise;
     } catch (error) {
-      setChatError(errorMessage(error, 'Der Arbeitstag konnte nicht gespeichert werden.'));
+      const failureMessage = errorMessage(error, 'Der Arbeitstag konnte nicht gespeichert werden.');
+      setTransientMessage((currentMessage) =>
+        currentMessage?.id === submissionId ? { ...currentMessage, status: 'error', visibleResponse: '', error: failureMessage } : currentMessage,
+      );
     } finally {
       setSending(false);
     }
@@ -274,11 +376,13 @@ export function CommandScreen({ onOpenSettings }: CommandScreenProps) {
     setMonthlyCloseMonth(month);
     setMonthPickerVisible(false);
     setMonthlyCloseResult(null);
+    if (monthlyCloseTimerRef.current) clearTimeout(monthlyCloseTimerRef.current);
     setCloseMonthVisible(true);
   };
 
   const dismissMonthlyClose = () => {
     if (monthlyCloseSubmitting) return;
+    if (monthlyCloseTimerRef.current) clearTimeout(monthlyCloseTimerRef.current);
     setMonthPickerVisible(false);
     setCloseMonthVisible(false);
   };
@@ -299,6 +403,10 @@ export function CommandScreen({ onOpenSettings }: CommandScreenProps) {
         body: JSON.stringify({ year, month: monthlyCloseMonth }),
       });
       setMonthlyCloseResult({ kind: 'success', message: payload.response_message });
+      monthlyCloseTimerRef.current = setTimeout(() => {
+        setMonthPickerVisible(false);
+        setCloseMonthVisible(false);
+      }, monthlyCloseSuccessDelayMilliseconds);
     } catch (error) {
       setMonthlyCloseResult({ kind: 'error', message: errorMessage(error, 'Der Monatsabschluss konnte nicht erstellt werden.') });
     } finally {
@@ -338,27 +446,65 @@ export function CommandScreen({ onOpenSettings }: CommandScreenProps) {
             showsVerticalScrollIndicator={false}
             style={styles.chatScroll}
           >
-            {selectedMessages.length > 0 ? (
-              selectedMessages.map((storedMessage) => (
-                <View key={storedMessage.id} style={styles.messagePair} testID="chat-message">
-                  <View style={styles.userBubble}>
-                    <Text style={styles.userBubbleText}>{storedMessage.message}</Text>
-                  </View>
-
-                  <View style={styles.assistantRow}>
-                    <View style={styles.avatarSmall}>
-                      <Text style={styles.avatarSmallText}>T</Text>
+            {selectedMessages.length > 0 || selectedTransientMessage ? (
+              <>
+                {selectedMessages.map((storedMessage) => (
+                  <View key={storedMessage.id} style={styles.messagePair} testID="chat-message">
+                    <View style={styles.userBubble}>
+                      <Text style={styles.userBubbleText}>{storedMessage.message}</Text>
                     </View>
-                    <View style={styles.assistantContent}>
-                      <Text style={styles.assistantText}>{storedMessage.response}</Text>
-                      <View style={styles.successBadge}>
-                        <Feather color={colors.successText} name="check" size={11} />
-                        <Text style={styles.successText}>Erfasst</Text>
+
+                    <View style={styles.assistantRow}>
+                      <View style={styles.avatarSmall}>
+                        <Text style={styles.avatarSmallText}>T</Text>
+                      </View>
+                      <View style={styles.assistantContent}>
+                        <Text style={styles.assistantText}>{storedMessage.response}</Text>
+                        <View style={styles.successBadge}>
+                          <Feather color={colors.successText} name="check" size={11} />
+                          <Text style={styles.successText}>Erfasst</Text>
+                        </View>
                       </View>
                     </View>
                   </View>
-                </View>
-              ))
+                ))}
+
+                {selectedTransientMessage ? (
+                  <View key={selectedTransientMessage.id} style={styles.messagePair} testID="transient-chat-message">
+                    <View style={styles.userBubble}>
+                      <Text style={styles.userBubbleText}>{selectedTransientMessage.message}</Text>
+                    </View>
+
+                    <View style={styles.assistantRow}>
+                      <View style={styles.avatarSmall}>
+                        <Text style={styles.avatarSmallText}>T</Text>
+                      </View>
+                      <View style={styles.assistantContent}>
+                        {selectedTransientMessage.status === 'pending' ? <TypingIndicator reduceMotion={reduceMotion} /> : null}
+                        {selectedTransientMessage.status === 'revealing' ? (
+                          <Text accessibilityLiveRegion="polite" style={styles.assistantText}>
+                            {selectedTransientMessage.visibleResponse}
+                          </Text>
+                        ) : null}
+                        {selectedTransientMessage.status === 'error' ? (
+                          <View accessibilityLiveRegion="polite" style={styles.failedMessage}>
+                            <Text style={styles.failedMessageText}>{selectedTransientMessage.error}</Text>
+                            <Pressable
+                              accessibilityLabel="Nachricht erneut senden"
+                              disabled={sending}
+                              onPress={() => void submitMessage(selectedTransientMessage.message)}
+                              style={({ pressed }) => [styles.retryButton, pressed && styles.retryButtonPressed]}
+                            >
+                              <Feather color="#C8C1EC" name="rotate-ccw" size={13} />
+                              <Text style={styles.retryButtonText}>Erneut versuchen</Text>
+                            </Pressable>
+                          </View>
+                        ) : null}
+                      </View>
+                    </View>
+                  </View>
+                ) : null}
+              </>
             ) : historyLoading ? (
               <View style={styles.emptyChat}>
                 <ActivityIndicator color={colors.primary} />
@@ -539,16 +685,29 @@ export function CommandScreen({ onOpenSettings }: CommandScreenProps) {
 
       {closeMonthVisible ? (
         <View style={[styles.overlay, styles.modalOverlay]} testID="month-close-modal">
-          <Pressable accessibilityLabel="Monatsabschluss schließen" onPress={dismissMonthlyClose} style={StyleSheet.absoluteFill} />
+          <Pressable accessible={false} onPress={dismissMonthlyClose} style={StyleSheet.absoluteFill} />
           <View style={styles.closeModal}>
-            <Text style={styles.modalTitle}>Monatsabschluss</Text>
+            <View style={styles.modalHeader}>
+              <Text style={styles.modalTitle}>Monatsabschluss</Text>
+              <Pressable
+                accessibilityLabel="Monatsabschluss schließen"
+                accessibilityRole="button"
+                accessibilityState={{ disabled: monthlyCloseSubmitting }}
+                disabled={monthlyCloseSubmitting}
+                hitSlop={10}
+                onPress={dismissMonthlyClose}
+                style={[styles.modalCloseButton, monthlyCloseSubmitting && styles.buttonDisabled]}
+              >
+                <Feather color={colors.textMuted} name="x" size={22} />
+              </Pressable>
+            </View>
             <Text style={styles.modalSubtitle}>Zeitraum prüfen und Vorgang starten.</Text>
 
             <Text style={styles.modalLabel}>JAHR</Text>
             <View style={styles.modalField}>
               <TextInput
                 accessibilityLabel="Jahr für Monatsabschluss"
-                editable={!monthlyCloseSubmitting}
+                editable={!monthlyCloseLocked}
                 keyboardType="number-pad"
                 maxLength={4}
                 onChangeText={(value) => setMonthlyCloseYear(value.replace(/\D/g, ''))}
@@ -562,7 +721,7 @@ export function CommandScreen({ onOpenSettings }: CommandScreenProps) {
             <Text style={[styles.modalLabel, styles.monthFieldLabel]}>MONAT</Text>
             <Pressable
               accessibilityLabel="Monat für Monatsabschluss auswählen"
-              disabled={monthlyCloseSubmitting}
+              disabled={monthlyCloseLocked}
               onPress={() => setMonthPickerVisible((visible) => !visible)}
               style={styles.modalField}
             >
@@ -605,9 +764,9 @@ export function CommandScreen({ onOpenSettings }: CommandScreenProps) {
 
             <Pressable
               accessibilityLabel="Monatsabschluss erstellen"
-              disabled={monthlyCloseSubmitting}
+              disabled={monthlyCloseLocked}
               onPress={() => void submitMonthlyClose()}
-              style={({ pressed }) => [styles.closeButton, monthlyCloseSubmitting && styles.buttonDisabled, pressed && styles.signInButtonPressed]}
+              style={({ pressed }) => [styles.closeButton, monthlyCloseLocked && styles.buttonDisabled, pressed && styles.signInButtonPressed]}
             >
               {monthlyCloseSubmitting ? <ActivityIndicator color={colors.text} /> : <Text style={styles.closeButtonText}>Abschließen</Text>}
             </Pressable>
@@ -670,6 +829,25 @@ const styles = StyleSheet.create({
   avatarSmallText: { color: colors.text, fontSize: 12, fontWeight: '600' },
   assistantContent: { flex: 1, paddingRight: 24 },
   assistantText: { color: colors.text, fontSize: 13, lineHeight: 19 },
+  typingIndicator: { minHeight: 19, flexDirection: 'row', alignItems: 'baseline' },
+  typingIndicatorText: { color: colors.textMuted, fontSize: 12, lineHeight: 19 },
+  typingDots: { width: 18, color: '#A99BFF', fontSize: 13, lineHeight: 19 },
+  failedMessage: { gap: 10 },
+  failedMessageText: { color: '#FFAAA6', fontSize: 11, lineHeight: 16 },
+  retryButton: {
+    alignSelf: 'flex-start',
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    paddingHorizontal: 11,
+    paddingVertical: 7,
+    borderRadius: radii.pill,
+    borderWidth: 1,
+    borderColor: '#4A416D',
+    backgroundColor: colors.primarySoft,
+  },
+  retryButtonPressed: { backgroundColor: colors.surfacePurple },
+  retryButtonText: { color: '#C8C1EC', fontSize: 10, fontWeight: '600' },
   successBadge: {
     alignSelf: 'flex-start',
     flexDirection: 'row',
@@ -881,6 +1059,8 @@ const styles = StyleSheet.create({
     shadowOffset: { width: 0, height: 14 },
     elevation: 22,
   },
+  modalHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
+  modalCloseButton: { width: 34, height: 34, alignItems: 'center', justifyContent: 'center', borderRadius: 17 },
   modalTitle: { color: colors.text, fontSize: 20, fontWeight: '700' },
   modalSubtitle: { marginTop: 7, marginBottom: 28, color: colors.textMuted, fontSize: 11 },
   modalLabel: { marginBottom: 9, color: colors.textMuted, fontSize: 9, fontWeight: '700' },
