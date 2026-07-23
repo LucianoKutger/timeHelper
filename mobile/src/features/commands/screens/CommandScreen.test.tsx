@@ -1,16 +1,52 @@
-import { render, userEvent } from '@testing-library/react-native';
+import { act, fireEvent, render, userEvent } from '@testing-library/react-native';
+import { ExpoSpeechRecognitionModule, type ExpoSpeechRecognitionResultEvent, useSpeechRecognitionEvent } from 'expo-speech-recognition';
 
 import { CommandScreen } from './CommandScreen';
+
+jest.mock('expo-speech-recognition', () => ({
+  ExpoSpeechRecognitionModule: {
+    abort: jest.fn(),
+    isRecognitionAvailable: jest.fn(() => true),
+    requestPermissionsAsync: jest.fn(() => Promise.resolve({ granted: true })),
+    start: jest.fn(),
+    stop: jest.fn(),
+  },
+  useSpeechRecognitionEvent: jest.fn(),
+}));
 
 jest.mock('../../../api/httpClient', () => ({
   apiFetch: jest.fn(() => Promise.resolve({ status: 'ok' })),
 }));
 
+beforeEach(() => jest.clearAllMocks());
+
 test('renders the command input', async () => {
   const view = await render(<CommandScreen />);
-  expect(view.getByPlaceholderText('Arbeitszeit hinzufügen …')).toBeTruthy();
+  const input = view.getByPlaceholderText('Arbeitszeit hinzufügen …');
+  expect(input).toBeTruthy();
+  expect(input.props.multiline).toBe(true);
+  expect(view.getByTestId('chat-keyboard-view')).toBeTruthy();
   expect(view.getByText('Für Juli 2026 wurden keine Nachrichten gefunden.')).toBeTruthy();
   expect(view.queryAllByTestId('chat-message')).toHaveLength(0);
+});
+
+test('grows the composer with multiple lines up to its maximum height', async () => {
+  const view = await render(<CommandScreen />);
+  const input = view.getByLabelText('Arbeitszeit hinzufügen');
+
+  await act(async () => {
+    fireEvent(input, 'contentSizeChange', {
+      nativeEvent: { contentSize: { height: 96, width: 200 } },
+    });
+  });
+  expect(view.getByLabelText('Arbeitszeit hinzufügen').props.style).toEqual(expect.arrayContaining([{ height: 96 }]));
+
+  await act(async () => {
+    fireEvent(input, 'contentSizeChange', {
+      nativeEvent: { contentSize: { height: 300, width: 200 } },
+    });
+  });
+  expect(view.getByLabelText('Arbeitszeit hinzufügen').props.style).toEqual(expect.arrayContaining([{ height: 144 }]));
 });
 
 test('shows only the ten messages from the selected month', async () => {
@@ -54,4 +90,42 @@ test('opens the designed overlay states', async () => {
   await user.press(view.getByText('Abschließen'));
   await user.press(view.getByLabelText('Spracheingabe starten'));
   expect(view.getByPlaceholderText('Sprache wird transkribiert …')).toBeTruthy();
+  expect(ExpoSpeechRecognitionModule.requestPermissionsAsync).toHaveBeenCalledTimes(1);
+  expect(ExpoSpeechRecognitionModule.start).toHaveBeenCalledWith(expect.objectContaining({ lang: 'de-DE', interimResults: true, continuous: true }));
+
+  await user.press(view.getByLabelText('Spracheingabe beenden'));
+  expect(ExpoSpeechRecognitionModule.stop).toHaveBeenCalledTimes(1);
+});
+
+test('keeps and combines multiple native speech segments in the composer', async () => {
+  const view = await render(<CommandScreen />);
+  const resultHandler = jest.mocked(useSpeechRecognitionEvent).mock.calls.find(([eventName]) => eventName === 'result')?.[1] as ((event: ExpoSpeechRecognitionResultEvent) => void) | undefined;
+
+  await act(async () => {
+    resultHandler?.({
+      isFinal: true,
+      results: [
+        {
+          confidence: 1,
+          segments: [],
+          transcript: 'Heute von neun bis fünf',
+        },
+      ],
+    });
+  });
+
+  await act(async () => {
+    resultHandler?.({
+      isFinal: false,
+      results: [
+        {
+          confidence: 1,
+          segments: [],
+          transcript: 'im Büro',
+        },
+      ],
+    });
+  });
+
+  expect(view.getByDisplayValue('Heute von neun bis fünf im Büro')).toBeTruthy();
 });

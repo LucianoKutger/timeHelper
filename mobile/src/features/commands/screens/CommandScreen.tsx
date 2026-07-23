@@ -1,8 +1,15 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Feather } from '@expo/vector-icons';
 import * as Crypto from 'expo-crypto';
 import {
+  ExpoSpeechRecognitionModule,
+  type ExpoSpeechRecognitionErrorCode,
+  useSpeechRecognitionEvent,
+} from 'expo-speech-recognition';
+import {
   ActivityIndicator,
+  KeyboardAvoidingView,
+  Platform,
   Pressable,
   ScrollView,
   StyleSheet,
@@ -26,6 +33,32 @@ const monthOptions = [
 
 const fallbackAssistantResponse = 'Alles klar — ich habe deinen Arbeitstag gespeichert.';
 const offlineAssistantResponse = 'Dein Eintrag ist vorgemerkt und wird synchronisiert, sobald die Verbindung wieder da ist.';
+const minimumComposerInputHeight = 48;
+const maximumComposerInputHeight = 144;
+
+function appendSpeechText(existingText: string, transcript: string) {
+  const trimmedTranscript = transcript.trim();
+  if (!trimmedTranscript) return existingText;
+  return existingText ? `${existingText.trimEnd()} ${trimmedTranscript}` : trimmedTranscript;
+}
+
+function speechErrorMessage(error: ExpoSpeechRecognitionErrorCode) {
+  switch (error) {
+    case 'not-allowed':
+      return 'Mikrofonzugriff wurde nicht erlaubt. Bitte aktiviere ihn in den App-Einstellungen.';
+    case 'no-speech':
+    case 'speech-timeout':
+      return 'Es wurde keine Sprache erkannt. Bitte versuche es erneut.';
+    case 'network':
+      return 'Die Spracherkennung konnte keine Verbindung herstellen.';
+    case 'language-not-supported':
+      return 'Die deutsche Spracherkennung ist auf diesem Gerät nicht verfügbar.';
+    case 'service-not-allowed':
+      return 'Auf diesem Gerät ist kein Dienst für Spracherkennung aktiviert.';
+    default:
+      return 'Die Spracheingabe konnte nicht gestartet werden. Bitte versuche es erneut.';
+  }
+}
 
 function workDateFromResponse(response: string, fallbackMonth: string) {
   return response.match(/\b\d{4}-\d{2}-\d{2}\b/)?.[0] ?? `${fallbackMonth}-01`;
@@ -36,6 +69,10 @@ type CommandScreenProps = {
 };
 
 export function CommandScreen({ onOpenSettings }: CommandScreenProps) {
+  const chatScrollRef = useRef<ScrollView>(null);
+  const recognitionStartedRef = useRef(false);
+  const speechFinalTranscriptRef = useRef('');
+  const speechInputPrefixRef = useRef('');
   const [message, setMessage] = useState('');
   const [messages, setMessages] = useState<Message[]>(dummyMessagesResponse.data);
   const [selectedMonthKey, setSelectedMonthKey] = useState<(typeof monthOptions)[number]['key']>(monthOptions[0].key);
@@ -43,6 +80,8 @@ export function CommandScreen({ onOpenSettings }: CommandScreenProps) {
   const [drawerVisible, setDrawerVisible] = useState(false);
   const [closeMonthVisible, setCloseMonthVisible] = useState(false);
   const [voiceActive, setVoiceActive] = useState(false);
+  const [voiceError, setVoiceError] = useState<string | null>(null);
+  const [composerInputHeight, setComposerInputHeight] = useState(minimumComposerInputHeight);
   const [sending, setSending] = useState(false);
 
   const selectedMonth = monthOptions.find((month) => month.key === selectedMonthKey) ?? monthOptions[0];
@@ -52,7 +91,89 @@ export function CommandScreen({ onOpenSettings }: CommandScreenProps) {
 
   useEffect(() => {
     apiFetch<{ status: string }>('/health').catch(() => undefined);
+
+    return () => {
+      if (recognitionStartedRef.current) ExpoSpeechRecognitionModule.abort();
+    };
   }, []);
+
+  useSpeechRecognitionEvent('start', () => {
+    recognitionStartedRef.current = true;
+    setVoiceActive(true);
+    setVoiceError(null);
+  });
+
+  useSpeechRecognitionEvent('result', (event) => {
+    const transcript = event.results[0]?.transcript;
+    if (!transcript) return;
+
+    const textBeforeCurrentSegment = appendSpeechText(speechInputPrefixRef.current, speechFinalTranscriptRef.current);
+    setMessage(appendSpeechText(textBeforeCurrentSegment, transcript));
+
+    if (event.isFinal) {
+      speechFinalTranscriptRef.current = appendSpeechText(speechFinalTranscriptRef.current, transcript);
+    }
+  });
+
+  useSpeechRecognitionEvent('end', () => {
+    recognitionStartedRef.current = false;
+    setVoiceActive(false);
+  });
+
+  useSpeechRecognitionEvent('error', (event) => {
+    recognitionStartedRef.current = false;
+    setVoiceActive(false);
+    if (event.error !== 'aborted') setVoiceError(speechErrorMessage(event.error));
+  });
+
+  const scrollChatToEnd = () => {
+    requestAnimationFrame(() => chatScrollRef.current?.scrollToEnd({ animated: true }));
+  };
+
+  const toggleVoiceInput = async () => {
+    if (voiceActive) {
+      ExpoSpeechRecognitionModule.stop();
+      return;
+    }
+
+    setVoiceError(null);
+
+    try {
+      if (!ExpoSpeechRecognitionModule.isRecognitionAvailable()) {
+        setVoiceError('Auf diesem Gerät ist kein Dienst für Spracherkennung aktiviert.');
+        return;
+      }
+
+      const permission = await ExpoSpeechRecognitionModule.requestPermissionsAsync();
+      if (!permission.granted) {
+        setVoiceError('Mikrofonzugriff wurde nicht erlaubt. Bitte aktiviere ihn in den App-Einstellungen.');
+        return;
+      }
+
+      const existingMessage = message.trimEnd();
+      speechInputPrefixRef.current = existingMessage;
+      speechFinalTranscriptRef.current = '';
+      recognitionStartedRef.current = true;
+      setVoiceActive(true);
+      ExpoSpeechRecognitionModule.start({
+        lang: 'de-DE',
+        interimResults: true,
+        continuous: true,
+        maxAlternatives: 1,
+        iosTaskHint: 'dictation',
+      });
+    } catch {
+      recognitionStartedRef.current = false;
+      setVoiceActive(false);
+      setVoiceError('Die Spracheingabe konnte nicht gestartet werden. Bitte versuche es erneut.');
+    }
+  };
+
+  const cancelVoiceInput = () => {
+    ExpoSpeechRecognitionModule.abort();
+    recognitionStartedRef.current = false;
+    setVoiceActive(false);
+  };
 
   const submitMessage = async () => {
     const trimmedMessage = message.trim();
@@ -60,6 +181,7 @@ export function CommandScreen({ onOpenSettings }: CommandScreenProps) {
 
     setSending(true);
     setMessage('');
+    setComposerInputHeight(minimumComposerInputHeight);
 
     try {
       const payload = await apiFetch<WorkDayResponse>('/v1/workday/', {
@@ -111,7 +233,7 @@ export function CommandScreen({ onOpenSettings }: CommandScreenProps) {
   };
 
   return (
-    <View style={styles.root}>
+    <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : 'height'} style={styles.root} testID="chat-keyboard-view">
       <SafeAreaView style={styles.safeArea} edges={['top', 'bottom']}>
         <View style={styles.header}>
           <Pressable accessibilityLabel="Navigation öffnen" hitSlop={12} onPress={openDrawer} style={styles.headerIcon}>
@@ -134,7 +256,11 @@ export function CommandScreen({ onOpenSettings }: CommandScreenProps) {
         <View style={styles.chatContent}>
           <ScrollView
             contentContainerStyle={styles.chatScrollContent}
+            keyboardDismissMode="interactive"
             keyboardShouldPersistTaps="handled"
+            onContentSizeChange={scrollChatToEnd}
+            onLayout={scrollChatToEnd}
+            ref={chatScrollRef}
             showsVerticalScrollIndicator={false}
             style={styles.chatScroll}
           >
@@ -189,7 +315,7 @@ export function CommandScreen({ onOpenSettings }: CommandScreenProps) {
                 <View style={styles.recordingDot} />
                 <View style={styles.voiceCopy}>
                   <Text style={styles.voiceTitle}>Spracheingabe aktiv</Text>
-                  <Text style={styles.voiceSubtitle}>Sprich jetzt — ich höre zu.</Text>
+                  <Text style={styles.voiceSubtitle}>Sprich jetzt — ich höre zu, bis du stoppst.</Text>
                 </View>
               </View>
               <View style={styles.voiceBottomRow}>
@@ -198,28 +324,39 @@ export function CommandScreen({ onOpenSettings }: CommandScreenProps) {
                     <View key={`${height}-${index}`} style={[styles.waveBar, { height }]} />
                   ))}
                 </View>
-                <Pressable accessibilityRole="button" onPress={() => setVoiceActive(false)}>
+                <Pressable accessibilityRole="button" onPress={cancelVoiceInput}>
                   <Text style={styles.cancelVoice}>Abbrechen</Text>
                 </Pressable>
               </View>
             </View>
           ) : null}
 
+          {voiceError ? (
+            <Text accessibilityLiveRegion="polite" style={styles.voiceError}>
+              {voiceError}
+            </Text>
+          ) : null}
+
           <View style={[styles.composer, voiceActive && styles.composerActive]}>
             <TextInput
               accessibilityLabel="Arbeitszeit hinzufügen"
+              multiline
               onChangeText={setMessage}
-              onSubmitEditing={() => void submitMessage()}
+              onContentSizeChange={({ nativeEvent }) => {
+                setComposerInputHeight(Math.min(maximumComposerInputHeight, Math.max(minimumComposerInputHeight, nativeEvent.contentSize.height)));
+              }}
+              onFocus={scrollChatToEnd}
               placeholder={voiceActive ? 'Sprache wird transkribiert …' : 'Arbeitszeit hinzufügen …'}
               placeholderTextColor={voiceActive ? '#BEB5EA' : colors.textFaint}
-              returnKeyType="send"
-              style={styles.composerInput}
+              scrollEnabled={composerInputHeight >= maximumComposerInputHeight}
+              style={[styles.composerInput, { height: composerInputHeight }]}
+              submitBehavior="newline"
               value={message}
             />
             <Pressable
               accessibilityLabel={voiceActive ? 'Spracheingabe beenden' : 'Spracheingabe starten'}
               hitSlop={8}
-              onPress={() => setVoiceActive((active) => !active)}
+              onPress={() => void toggleVoiceInput()}
               style={voiceActive ? styles.voiceMicButton : styles.plainIconButton}
             >
               <Feather color={voiceActive ? colors.text : colors.textMuted} name="mic" size={voiceActive ? 19 : 18} />
@@ -355,7 +492,7 @@ export function CommandScreen({ onOpenSettings }: CommandScreenProps) {
           </View>
         </View>
       ) : null}
-    </View>
+    </KeyboardAvoidingView>
   );
 }
 
@@ -433,7 +570,7 @@ const styles = StyleSheet.create({
   composer: {
     minHeight: 54,
     flexDirection: 'row',
-    alignItems: 'center',
+    alignItems: 'flex-end',
     paddingLeft: 15,
     paddingRight: 6,
     borderRadius: 27,
@@ -442,8 +579,24 @@ const styles = StyleSheet.create({
     backgroundColor: colors.surface,
   },
   composerActive: { borderColor: colors.primary, backgroundColor: '#18152A' },
-  composerInput: { flex: 1, minHeight: 48, color: colors.text, fontSize: 12, paddingVertical: 0 },
-  plainIconButton: { width: 36, height: 42, alignItems: 'center', justifyContent: 'center' },
+  composerInput: {
+    flex: 1,
+    minHeight: minimumComposerInputHeight,
+    maxHeight: maximumComposerInputHeight,
+    color: colors.text,
+    fontSize: 12,
+    lineHeight: 18,
+    paddingTop: 15,
+    paddingBottom: 15,
+    textAlignVertical: 'top',
+  },
+  plainIconButton: {
+    width: 36,
+    height: 42,
+    marginBottom: 6,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
   sendButton: {
     width: 42,
     height: 42,
@@ -451,6 +604,7 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     borderRadius: 21,
     backgroundColor: colors.primary,
+    marginBottom: 6,
   },
   sendButtonPressed: { backgroundColor: colors.primaryPressed },
   voiceMicButton: {
@@ -467,6 +621,7 @@ const styles = StyleSheet.create({
     shadowRadius: 9,
     shadowOffset: { width: 0, height: 0 },
     elevation: 7,
+    marginBottom: 6,
   },
   voiceCard: {
     marginHorizontal: 10,
@@ -486,6 +641,13 @@ const styles = StyleSheet.create({
   waveform: { height: 25, flexDirection: 'row', alignItems: 'flex-end', gap: 4 },
   waveBar: { width: 2, borderRadius: 1, backgroundColor: '#9381FF' },
   cancelVoice: { color: '#C8C1EC', fontSize: 10 },
+  voiceError: {
+    marginHorizontal: 12,
+    marginBottom: 8,
+    color: '#FFAAA6',
+    fontSize: 10,
+    lineHeight: 14,
+  },
   monthMenu: {
     position: 'absolute',
     top: 82,

@@ -10,6 +10,7 @@
     "newArchEnabled": true,
     "android": {
       "package": "com.lucianokutger.timehelper",
+      "softwareKeyboardLayoutMode": "resize",
       "adaptiveIcon": {
         "backgroundColor": "#E6F4FE",
         "foregroundImage": "./assets/android-icon-foreground.png",
@@ -21,7 +22,14 @@
     "plugins": [
       "expo-secure-store",
       "expo-sharing",
-      "expo-asset"
+      "expo-asset",
+      [
+        "expo-speech-recognition",
+        {
+          "microphonePermission": "Erlaube timeHelper den Zugriff auf das Mikrofon.",
+          "speechRecognitionPermission": "Erlaube timeHelper die Umwandlung von Sprache in Text."
+        }
+      ]
     ],
     "extra": {
       "eas": {
