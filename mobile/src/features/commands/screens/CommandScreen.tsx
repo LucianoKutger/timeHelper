@@ -21,20 +21,31 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 
 import { apiFetch } from '../../../api/httpClient';
 import { colors, radii } from '../../../theme';
-import type { WorkDayResponse } from '../../../types/api';
-import { dummyMessagesResponse, type Message } from '../messages';
+import type { MonthlyCloseResponse, WorkDayResponse } from '../../../types/api';
+import { loadStoredMessages, saveStoredMessages } from '../messageStorage';
+import type { Message } from '../messages';
 
-const monthOptions = [
-  { key: '2026-07', label: 'Juli 2026' },
-  { key: '2026-06', label: 'Juni 2026' },
-  { key: '2026-05', label: 'Mai 2026' },
-  { key: '2026-04', label: 'April 2026' },
-] as const;
-
-const fallbackAssistantResponse = 'Alles klar — ich habe deinen Arbeitstag gespeichert.';
-const offlineAssistantResponse = 'Dein Eintrag ist vorgemerkt und wird synchronisiert, sobald die Verbindung wieder da ist.';
+const germanMonthNames = ['Januar', 'Februar', 'März', 'April', 'Mai', 'Juni', 'Juli', 'August', 'September', 'Oktober', 'November', 'Dezember'] as const;
 const minimumComposerInputHeight = 48;
 const maximumComposerInputHeight = 144;
+
+function localMonthKey(date = new Date()) {
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}`;
+}
+
+function recentMonthKeys(numberOfMonths = 6) {
+  const currentDate = new Date();
+  return Array.from({ length: numberOfMonths }, (_, index) => localMonthKey(new Date(currentDate.getFullYear(), currentDate.getMonth() - index, 1)));
+}
+
+function labelForMonthKey(monthKey: string) {
+  const [year, month] = monthKey.split('-').map(Number);
+  return `${germanMonthNames[month - 1] ?? monthKey} ${year}`;
+}
+
+function errorMessage(error: unknown, fallback: string) {
+  return error instanceof Error && error.message ? error.message : fallback;
+}
 
 function appendSpeechText(existingText: string, transcript: string) {
   const trimmedTranscript = transcript.trim();
@@ -74,16 +85,26 @@ export function CommandScreen({ onOpenSettings }: CommandScreenProps) {
   const speechFinalTranscriptRef = useRef('');
   const speechInputPrefixRef = useRef('');
   const [message, setMessage] = useState('');
-  const [messages, setMessages] = useState<Message[]>(dummyMessagesResponse.data);
-  const [selectedMonthKey, setSelectedMonthKey] = useState<(typeof monthOptions)[number]['key']>(monthOptions[0].key);
+  const [messages, setMessages] = useState<Message[]>([]);
+  const [selectedMonthKey, setSelectedMonthKey] = useState(localMonthKey);
+  const [historyLoading, setHistoryLoading] = useState(true);
+  const [chatError, setChatError] = useState<string | null>(null);
   const [monthMenuVisible, setMonthMenuVisible] = useState(false);
   const [drawerVisible, setDrawerVisible] = useState(false);
   const [closeMonthVisible, setCloseMonthVisible] = useState(false);
+  const [monthlyCloseYear, setMonthlyCloseYear] = useState(() => String(new Date().getFullYear()));
+  const [monthlyCloseMonth, setMonthlyCloseMonth] = useState(() => new Date().getMonth() + 1);
+  const [monthPickerVisible, setMonthPickerVisible] = useState(false);
+  const [monthlyCloseSubmitting, setMonthlyCloseSubmitting] = useState(false);
+  const [monthlyCloseResult, setMonthlyCloseResult] = useState<{ kind: 'success' | 'error'; message: string } | null>(null);
   const [voiceActive, setVoiceActive] = useState(false);
   const [voiceError, setVoiceError] = useState<string | null>(null);
   const [composerInputHeight, setComposerInputHeight] = useState(minimumComposerInputHeight);
   const [sending, setSending] = useState(false);
 
+  const monthOptions = Array.from(new Set([...recentMonthKeys(), ...messages.map((storedMessage) => storedMessage.work_date.slice(0, 7)), selectedMonthKey]))
+    .sort((first, second) => second.localeCompare(first))
+    .map((key) => ({ key, label: labelForMonthKey(key) }));
   const selectedMonth = monthOptions.find((month) => month.key === selectedMonthKey) ?? monthOptions[0];
   const selectedMessages = messages
     .filter((storedMessage) => storedMessage.work_date.startsWith(selectedMonth.key))
@@ -94,6 +115,25 @@ export function CommandScreen({ onOpenSettings }: CommandScreenProps) {
 
     return () => {
       if (recognitionStartedRef.current) ExpoSpeechRecognitionModule.abort();
+    };
+  }, []);
+
+  useEffect(() => {
+    let active = true;
+
+    loadStoredMessages()
+      .then((storedMessages) => {
+        if (active) setMessages(storedMessages);
+      })
+      .catch(() => {
+        if (active) setChatError('Die lokale Chat-Historie konnte nicht geladen werden.');
+      })
+      .finally(() => {
+        if (active) setHistoryLoading(false);
+      });
+
+    return () => {
+      active = false;
     };
   }, []);
 
@@ -177,11 +217,10 @@ export function CommandScreen({ onOpenSettings }: CommandScreenProps) {
 
   const submitMessage = async () => {
     const trimmedMessage = message.trim();
-    if (!trimmedMessage || sending) return;
+    if (!trimmedMessage || sending || historyLoading) return;
 
     setSending(true);
-    setMessage('');
-    setComposerInputHeight(minimumComposerInputHeight);
+    setChatError(null);
 
     try {
       const payload = await apiFetch<WorkDayResponse>('/v1/workday/', {
@@ -189,34 +228,35 @@ export function CommandScreen({ onOpenSettings }: CommandScreenProps) {
         body: JSON.stringify({ message: trimmedMessage }),
       });
 
-      const response = payload.response_massage || fallbackAssistantResponse;
-      setMessages((currentMessages) => [
-        ...currentMessages,
-        {
-          id: Crypto.randomUUID(),
-          message: trimmedMessage,
-          response,
-          work_date: workDateFromResponse(response, selectedMonth.key),
-          created_at: new Date().toISOString(),
-        },
-      ]);
-    } catch {
-      setMessages((currentMessages) => [
-        ...currentMessages,
-        {
-          id: Crypto.randomUUID(),
-          message: trimmedMessage,
-          response: offlineAssistantResponse,
-          work_date: `${selectedMonth.key}-01`,
-          created_at: new Date().toISOString(),
-        },
-      ]);
+      const response = payload.response_massage;
+      const workDate = workDateFromResponse(response, selectedMonth.key);
+      const storedMessage: Message = {
+        id: Crypto.randomUUID(),
+        message: trimmedMessage,
+        response,
+        work_date: workDate,
+        created_at: new Date().toISOString(),
+      };
+      const updatedMessages = [...messages, storedMessage];
+
+      setMessages(updatedMessages);
+      setSelectedMonthKey(workDate.slice(0, 7));
+      setMessage('');
+      setComposerInputHeight(minimumComposerInputHeight);
+
+      try {
+        await saveStoredMessages(updatedMessages);
+      } catch {
+        setChatError('Der Arbeitstag wurde gespeichert, aber die lokale Chat-Historie konnte nicht aktualisiert werden.');
+      }
+    } catch (error) {
+      setChatError(errorMessage(error, 'Der Arbeitstag konnte nicht gespeichert werden.'));
     } finally {
       setSending(false);
     }
   };
 
-  const selectMonth = (monthKey: (typeof monthOptions)[number]['key']) => {
+  const selectMonth = (monthKey: string) => {
     setSelectedMonthKey(monthKey);
     setMonthMenuVisible(false);
     setDrawerVisible(false);
@@ -228,8 +268,42 @@ export function CommandScreen({ onOpenSettings }: CommandScreenProps) {
   };
 
   const openMonthClose = () => {
+    const [year, month] = selectedMonth.key.split('-').map(Number);
     setDrawerVisible(false);
+    setMonthlyCloseYear(String(year));
+    setMonthlyCloseMonth(month);
+    setMonthPickerVisible(false);
+    setMonthlyCloseResult(null);
     setCloseMonthVisible(true);
+  };
+
+  const dismissMonthlyClose = () => {
+    if (monthlyCloseSubmitting) return;
+    setMonthPickerVisible(false);
+    setCloseMonthVisible(false);
+  };
+
+  const submitMonthlyClose = async () => {
+    const year = Number(monthlyCloseYear);
+    if (!/^\d{4}$/.test(monthlyCloseYear) || year < 2000 || year > 2100) {
+      setMonthlyCloseResult({ kind: 'error', message: 'Bitte gib ein gültiges vierstelliges Jahr an.' });
+      return;
+    }
+
+    setMonthlyCloseSubmitting(true);
+    setMonthlyCloseResult(null);
+
+    try {
+      const payload = await apiFetch<MonthlyCloseResponse>('/v1/monthly_close/', {
+        method: 'POST',
+        body: JSON.stringify({ year, month: monthlyCloseMonth }),
+      });
+      setMonthlyCloseResult({ kind: 'success', message: payload.response_message });
+    } catch (error) {
+      setMonthlyCloseResult({ kind: 'error', message: errorMessage(error, 'Der Monatsabschluss konnte nicht erstellt werden.') });
+    } finally {
+      setMonthlyCloseSubmitting(false);
+    }
   };
 
   return (
@@ -277,20 +351,6 @@ export function CommandScreen({ onOpenSettings }: CommandScreenProps) {
                     </View>
                     <View style={styles.assistantContent}>
                       <Text style={styles.assistantText}>{storedMessage.response}</Text>
-                      <View style={styles.summary}>
-                        <View style={styles.summaryRow}>
-                          <Text style={styles.summaryLabel}>Arbeitszeit</Text>
-                          <Text style={styles.summaryValue}>8 Std. 15 Min.</Text>
-                        </View>
-                        <View style={styles.summaryRow}>
-                          <Text style={styles.summaryLabel}>Pause</Text>
-                          <Text style={styles.summaryValue}>30 Min.</Text>
-                        </View>
-                        <View style={styles.summaryRow}>
-                          <Text style={styles.summaryLabel}>Ort</Text>
-                          <Text style={styles.summaryValue}>Büro</Text>
-                        </View>
-                      </View>
                       <View style={styles.successBadge}>
                         <Feather color={colors.successText} name="check" size={11} />
                         <Text style={styles.successText}>Erfasst</Text>
@@ -299,6 +359,11 @@ export function CommandScreen({ onOpenSettings }: CommandScreenProps) {
                   </View>
                 </View>
               ))
+            ) : historyLoading ? (
+              <View style={styles.emptyChat}>
+                <ActivityIndicator color={colors.primary} />
+                <Text style={styles.emptyChatText}>Chat-Historie wird geladen …</Text>
+              </View>
             ) : (
               <View style={styles.emptyChat}>
                 <Text style={styles.emptyChatTitle}>Noch keine Einträge</Text>
@@ -337,6 +402,12 @@ export function CommandScreen({ onOpenSettings }: CommandScreenProps) {
             </Text>
           ) : null}
 
+          {chatError ? (
+            <Text accessibilityLiveRegion="polite" style={styles.chatError}>
+              {chatError}
+            </Text>
+          ) : null}
+
           <View style={[styles.composer, voiceActive && styles.composerActive]}>
             <TextInput
               accessibilityLabel="Arbeitszeit hinzufügen"
@@ -364,9 +435,9 @@ export function CommandScreen({ onOpenSettings }: CommandScreenProps) {
             {!voiceActive ? (
               <Pressable
                 accessibilityLabel="Eintrag senden"
-                disabled={sending}
+                disabled={sending || historyLoading}
                 onPress={() => void submitMessage()}
-                style={({ pressed }) => [styles.sendButton, pressed && styles.sendButtonPressed]}
+                style={({ pressed }) => [styles.sendButton, (sending || historyLoading) && styles.buttonDisabled, pressed && styles.sendButtonPressed]}
               >
                 {sending ? (
                   <ActivityIndicator color={colors.text} size="small" />
@@ -382,22 +453,24 @@ export function CommandScreen({ onOpenSettings }: CommandScreenProps) {
       {monthMenuVisible ? (
         <View style={styles.monthMenu} testID="month-menu">
           <Text style={styles.eyebrow}>MONAT AUSWÄHLEN</Text>
-          {monthOptions.map((month) => {
-            const selected = selectedMonth.key === month.key;
-            return (
-              <Pressable
-                accessibilityRole="button"
-                accessibilityState={{ selected }}
-                key={month.key}
-                onPress={() => selectMonth(month.key)}
-                style={[styles.monthOption, selected && styles.monthOptionSelected]}
-              >
-                <Text style={[styles.monthOptionText, selected && styles.monthOptionTextSelected]}>{month.label}</Text>
-                {selected ? <Feather color="#AFA0FF" name="check" size={18} /> : null}
-              </Pressable>
-            );
-          })}
-          <Text style={styles.allMonths}>Alle vorhandenen Monate</Text>
+          <ScrollView showsVerticalScrollIndicator={false} style={styles.monthOptionsScroll}>
+            {monthOptions.map((month) => {
+              const selected = selectedMonth.key === month.key;
+              return (
+                <Pressable
+                  accessibilityRole="button"
+                  accessibilityState={{ selected }}
+                  key={month.key}
+                  onPress={() => selectMonth(month.key)}
+                  style={[styles.monthOption, selected && styles.monthOptionSelected]}
+                >
+                  <Text style={[styles.monthOptionText, selected && styles.monthOptionTextSelected]}>{month.label}</Text>
+                  {selected ? <Feather color="#AFA0FF" name="check" size={18} /> : null}
+                </Pressable>
+              );
+            })}
+          </ScrollView>
+          <Text style={styles.allMonths}>Letzte Monate und lokale Chats</Text>
         </View>
       ) : null}
 
@@ -421,8 +494,8 @@ export function CommandScreen({ onOpenSettings }: CommandScreenProps) {
               <Text style={styles.drawerSectionLabel}>MONATSABSCHLUSS</Text>
               <Pressable onPress={openMonthClose} style={styles.closeMonthCard}>
                 <View style={styles.closeMonthCopy}>
-                  <Text style={styles.closeMonthTitle}>Juli 2026 abschließen</Text>
-                  <Text style={styles.closeMonthSubtitle}>Excel erstellen und per E-Mail senden</Text>
+                  <Text style={styles.closeMonthTitle}>{selectedMonth.label} abschließen</Text>
+                  <Text style={styles.closeMonthSubtitle}>Excel-Datei im Backend erstellen</Text>
                 </View>
                 <View style={styles.editButton}>
                   <Feather color="#A99BFF" name="edit-3" size={17} />
@@ -466,29 +539,79 @@ export function CommandScreen({ onOpenSettings }: CommandScreenProps) {
 
       {closeMonthVisible ? (
         <View style={[styles.overlay, styles.modalOverlay]} testID="month-close-modal">
-          <Pressable accessibilityLabel="Monatsabschluss schließen" onPress={() => setCloseMonthVisible(false)} style={StyleSheet.absoluteFill} />
+          <Pressable accessibilityLabel="Monatsabschluss schließen" onPress={dismissMonthlyClose} style={StyleSheet.absoluteFill} />
           <View style={styles.closeModal}>
             <Text style={styles.modalTitle}>Monatsabschluss</Text>
             <Text style={styles.modalSubtitle}>Zeitraum prüfen und Vorgang starten.</Text>
 
             <Text style={styles.modalLabel}>JAHR</Text>
             <View style={styles.modalField}>
-              <Text style={styles.modalFieldText}>2026</Text>
+              <TextInput
+                accessibilityLabel="Jahr für Monatsabschluss"
+                editable={!monthlyCloseSubmitting}
+                keyboardType="number-pad"
+                maxLength={4}
+                onChangeText={(value) => setMonthlyCloseYear(value.replace(/\D/g, ''))}
+                placeholder="2026"
+                placeholderTextColor={colors.textFaint}
+                style={styles.modalFieldInput}
+                value={monthlyCloseYear}
+              />
             </View>
 
             <Text style={[styles.modalLabel, styles.monthFieldLabel]}>MONAT</Text>
-            <View style={styles.modalField}>
-              <Text style={styles.modalFieldText}>Juli</Text>
+            <Pressable
+              accessibilityLabel="Monat für Monatsabschluss auswählen"
+              disabled={monthlyCloseSubmitting}
+              onPress={() => setMonthPickerVisible((visible) => !visible)}
+              style={styles.modalField}
+            >
+              <Text style={styles.modalFieldText}>{germanMonthNames[monthlyCloseMonth - 1]}</Text>
               <Feather color={colors.textMuted} name="chevron-down" size={16} />
-            </View>
+            </Pressable>
+
+            {monthPickerVisible ? (
+              <ScrollView keyboardShouldPersistTaps="handled" showsVerticalScrollIndicator={false} style={styles.monthPicker} testID="monthly-close-month-picker">
+                {germanMonthNames.map((monthName, index) => {
+                  const monthNumber = index + 1;
+                  const selected = monthlyCloseMonth === monthNumber;
+                  return (
+                    <Pressable
+                      accessibilityRole="button"
+                      accessibilityState={{ selected }}
+                      key={monthName}
+                      onPress={() => {
+                        setMonthlyCloseMonth(monthNumber);
+                        setMonthPickerVisible(false);
+                      }}
+                      style={[styles.monthPickerOption, selected && styles.monthOptionSelected]}
+                    >
+                      <Text style={[styles.monthOptionText, selected && styles.monthOptionTextSelected]}>{monthName}</Text>
+                      {selected ? <Feather color="#AFA0FF" name="check" size={17} /> : null}
+                    </Pressable>
+                  );
+                })}
+              </ScrollView>
+            ) : null}
+
+            {monthlyCloseResult ? (
+              <Text
+                accessibilityLiveRegion="polite"
+                style={[styles.monthlyCloseResult, monthlyCloseResult.kind === 'success' ? styles.monthlyCloseSuccess : styles.monthlyCloseError]}
+              >
+                {monthlyCloseResult.message}
+              </Text>
+            ) : null}
 
             <Pressable
-              onPress={() => setCloseMonthVisible(false)}
-              style={({ pressed }) => [styles.closeButton, pressed && styles.signInButtonPressed]}
+              accessibilityLabel="Monatsabschluss erstellen"
+              disabled={monthlyCloseSubmitting}
+              onPress={() => void submitMonthlyClose()}
+              style={({ pressed }) => [styles.closeButton, monthlyCloseSubmitting && styles.buttonDisabled, pressed && styles.signInButtonPressed]}
             >
-              <Text style={styles.closeButtonText}>Abschließen</Text>
+              {monthlyCloseSubmitting ? <ActivityIndicator color={colors.text} /> : <Text style={styles.closeButtonText}>Abschließen</Text>}
             </Pressable>
-            <Text style={styles.modalFootnote}>Der Abschluss kann einen Moment dauern.</Text>
+            <Text style={styles.modalFootnote}>Die Excel-Datei wird vom lokalen Backend erstellt.</Text>
           </View>
         </View>
       ) : null}
@@ -547,10 +670,6 @@ const styles = StyleSheet.create({
   avatarSmallText: { color: colors.text, fontSize: 12, fontWeight: '600' },
   assistantContent: { flex: 1, paddingRight: 24 },
   assistantText: { color: colors.text, fontSize: 13, lineHeight: 19 },
-  summary: { marginTop: 20, gap: 7 },
-  summaryRow: { flexDirection: 'row', alignItems: 'center' },
-  summaryLabel: { width: 85, color: colors.text, fontSize: 13 },
-  summaryValue: { color: colors.text, fontSize: 13 },
   successBadge: {
     alignSelf: 'flex-start',
     flexDirection: 'row',
@@ -607,6 +726,7 @@ const styles = StyleSheet.create({
     marginBottom: 6,
   },
   sendButtonPressed: { backgroundColor: colors.primaryPressed },
+  buttonDisabled: { opacity: 0.55 },
   voiceMicButton: {
     width: 40,
     height: 40,
@@ -648,6 +768,7 @@ const styles = StyleSheet.create({
     fontSize: 10,
     lineHeight: 14,
   },
+  chatError: { marginHorizontal: 12, marginBottom: 8, color: '#FFAAA6', fontSize: 10, lineHeight: 14 },
   monthMenu: {
     position: 'absolute',
     top: 82,
@@ -667,6 +788,7 @@ const styles = StyleSheet.create({
     elevation: 18,
   },
   eyebrow: { marginHorizontal: 4, marginBottom: 7, color: colors.textMuted, fontSize: 9, fontWeight: '700' },
+  monthOptionsScroll: { maxHeight: 270 },
   monthOption: {
     height: 42,
     flexDirection: 'row',
@@ -775,6 +897,27 @@ const styles = StyleSheet.create({
     backgroundColor: '#0E121A',
   },
   modalFieldText: { color: colors.text, fontSize: 13 },
+  modalFieldInput: { flex: 1, color: colors.text, fontSize: 13, paddingVertical: 0 },
+  monthPicker: {
+    maxHeight: 174,
+    marginTop: 8,
+    padding: 6,
+    borderRadius: radii.medium,
+    borderWidth: 1,
+    borderColor: colors.borderStrong,
+    backgroundColor: '#0E121A',
+  },
+  monthPickerOption: {
+    height: 40,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: 10,
+    borderRadius: radii.small,
+  },
+  monthlyCloseResult: { marginTop: 14, fontSize: 11, lineHeight: 16 },
+  monthlyCloseSuccess: { color: colors.successText },
+  monthlyCloseError: { color: '#FFAAA6' },
   closeButton: {
     height: 48,
     alignItems: 'center',
@@ -784,6 +927,6 @@ const styles = StyleSheet.create({
     backgroundColor: colors.primary,
   },
   closeButtonText: { color: colors.text, fontSize: 13, fontWeight: '700' },
-  modalFootnote: { position: 'absolute', bottom: -24, alignSelf: 'center', color: colors.textFaint, fontSize: 8 },
+  modalFootnote: { alignSelf: 'center', marginTop: 10, color: colors.textFaint, fontSize: 8 },
   signInButtonPressed: { backgroundColor: colors.primaryPressed },
 });
