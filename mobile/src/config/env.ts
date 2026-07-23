@@ -7,7 +7,7 @@ const schema = z.object({
 });
 
 export const env = schema.parse({
-  apiUrl: process.env.EXPO_PUBLIC_API_URL_DEV,
+  apiUrl: process.env.EXPO_PUBLIC_API_URL,
   supabaseUrl: process.env.EXPO_PUBLIC_SUPABASE_URL,
   supabasePublishableKey: process.env.EXPO_PUBLIC_SUPABASE_PUBLISHABLE_KEY,
 });

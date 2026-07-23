@@ -29,7 +29,8 @@
           "microphonePermission": "Erlaube timeHelper den Zugriff auf das Mikrofon.",
           "speechRecognitionPermission": "Erlaube timeHelper die Umwandlung von Sprache in Text."
         }
-      ]
+      ],
+      "expo-font"
     ],
     "extra": {
       "eas": {
