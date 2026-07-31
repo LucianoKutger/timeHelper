@@ -1,19 +1,30 @@
 # API-Übersicht
 
-Basis: `/v1`
+Der aktuelle FastAPI-Stand stellt drei Endpunkte bereit:
 
-- `GET /health`
-- `POST /v1/commands/preview`
-- `POST /v1/commands/{request_id}/confirm`
-- `GET /v1/work-days?year=&month=`
-- `PATCH /v1/work-days/{id}`
-- `DELETE /v1/work-days/{id}`
-- `POST /v1/monthly-reports`
-- `GET /v1/monthly-reports/{id}`
-- `POST /v1/artifacts/{id}/signed-url`
-- `POST /v1/email-drafts`
-- `POST /v1/email-drafts/{id}/save-to-mailbox`
-- `POST /v1/email-drafts/{id}/send`
-- `POST /v1/transcriptions` (Phase 2)
+| Methode | Pfad | Auth | Zweck |
+| --- | --- | --- | --- |
+| `GET` | `/health` | nein | einfacher Health Check (`{"status":"ok"}`) |
+| `POST` | `/v1/workday/` | Supabase Bearer-JWT | natürliche Nachricht interpretieren, validieren und als Arbeitstag speichern |
+| `POST` | `/v1/monthly_close/` | Supabase Bearer-JWT | Monatsdaten laden, Excel aktualisieren, speichern und E-Mail-Entwurf ablegen |
 
-Alle fachlichen Endpunkte erwarten ein Supabase-JWT. Schreibende Requests müssen eine stabile `request_id` verwenden.
+## Arbeitstag anlegen
+
+```json
+{
+  "message": "Am 30. Juli von 8 bis 12 und von 13 bis 16 Uhr gearbeitet"
+}
+```
+
+Die API speichert derzeit direkt nach erfolgreicher Interpretation und Validierung. Eine Preview-/Confirm-API ist im aktuellen Code nicht vorhanden.
+
+## Monatsabschluss
+
+```json
+{
+  "year": 2026,
+  "month": 7
+}
+```
+
+Beide fachlichen Endpunkte verwenden das Supabase-JWT des Nutzers für den nachgelagerten Zugriff. Die interaktive OpenAPI-Dokumentation ist bei lokal laufendem Backend unter `/docs` verfügbar.

@@ -3,10 +3,10 @@ services:
     name: timehelper-backend
     runtime: python
     rootDir: backend
-    buildCommand: pip install -r requirements.txt
-    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    buildCommand: uv sync --locked --no-dev
+    startCommand: uv run --no-sync uvicorn app.main:app --host 0.0.0.0 --port $PORT
     healthCheckPath: /health
-    autoDeploy: false
+    autoDeployTrigger: off
     envVars:
       - key: APP_TIMEZONE
         value: Europe/Berlin
@@ -23,4 +23,8 @@ services:
       - key: SUPABASE_JWKS_URL
         sync: false
       - key: ALLOWED_ORIGINS
+        sync: false
+      - key: WEBDE_USERNAME
+        sync: false
+      - key: WEBDE_APP_PASSWORD
         sync: false
